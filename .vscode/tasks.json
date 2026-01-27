@@ -1,0 +1,10 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Golf Genius MCP Server",
+			"type": "shell",
+			"command": "uv run main.py"
+		}
+	]
+}

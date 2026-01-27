@@ -1,0 +1,36 @@
+[project]
+name = "golf-genius-mcp"
+version = "0.2.0"
+description = "MCP server for accessing Golf Genius API - provides tools for tournament management, player rosters, and scoring data"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp[cli]>=1.26.0",
+    "python-dotenv>=1.2.1",
+    "pydantic>=2.0.0",
+    "tenacity>=8.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-httpx>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+golf-genius-mcp = "main:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
