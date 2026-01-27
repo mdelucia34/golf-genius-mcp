@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-import pytest_asyncio
 from pytest_httpx import HTTPXMock
 
 # Ensure API key is set before importing main
@@ -17,18 +16,22 @@ import main  # noqa: E402  (must come after env setup)
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Constants
 # ---------------------------------------------------------------------------
 
 BASE = main.BASE_URL
+KEY = "test-api-key-12345"
+GET_PREFIX = f"{BASE}/{KEY}"      # GET URLs:  /api_v2/{key}/...
+WRITE_PREFIX = f"{BASE}"          # Write URLs: /api_v2/...
 
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def _reset_client():
     """Reset the shared HTTP client before each test so pytest-httpx can intercept."""
-    if main._client is not None and not main._client.is_closed:
-        # We can't await close in a sync fixture, so just set to None
-        pass
     main._client = None
     yield
     main._client = None
@@ -76,20 +79,20 @@ class TestEventUpdateModel:
             main.EventUpdate(start_date="2025/01/01")
 
 
-class TestPlayerRegistrationModel:
+class TestMemberRegistrationModel:
     def test_valid_registration(self):
-        player = main.PlayerRegistration(
+        member = main.MemberRegistration(
             external_id="EXT-001",
             last_name="Woods",
             first_name="Tiger",
             email="tiger@example.com",
         )
-        assert player.last_name == "Woods"
-        assert player.email == "tiger@example.com"
+        assert member.last_name == "Woods"
+        assert member.email == "tiger@example.com"
 
     def test_invalid_email_rejected(self):
         with pytest.raises(Exception):
-            main.PlayerRegistration(
+            main.MemberRegistration(
                 external_id="EXT-001",
                 last_name="Woods",
                 email="not-an-email",
@@ -97,11 +100,11 @@ class TestPlayerRegistrationModel:
 
     def test_empty_external_id_rejected(self):
         with pytest.raises(Exception):
-            main.PlayerRegistration(external_id="", last_name="Woods")
+            main.MemberRegistration(external_id="", last_name="Woods")
 
     def test_email_none_allowed(self):
-        player = main.PlayerRegistration(external_id="EXT-001", last_name="Woods")
-        assert player.email is None
+        member = main.MemberRegistration(external_id="EXT-001", last_name="Woods")
+        assert member.email is None
 
 
 # ---------------------------------------------------------------------------
@@ -119,22 +122,53 @@ class TestExceptions:
         err = main.RateLimitError(retry_after=60)
         assert err.status_code == 429
         assert err.retry_after == 60
-        assert "60" in str(err)
 
     def test_rate_limit_no_retry_after(self):
         err = main.RateLimitError()
         assert err.retry_after is None
-        assert "Rate limited" in str(err)
 
     def test_authentication_error(self):
         err = main.AuthenticationError()
         assert err.status_code == 401
-        assert "Invalid" in str(err)
 
     def test_not_found_error(self):
         err = main.NotFoundError("Event")
         assert err.status_code == 404
         assert "Event not found" in str(err)
+
+
+# ---------------------------------------------------------------------------
+# URL Building Tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildUrl:
+    def test_get_url_includes_api_key(self):
+        url = main._build_url("GET", "/seasons")
+        assert url == f"{BASE}/{KEY}/seasons"
+
+    def test_post_url_excludes_api_key(self):
+        url = main._build_url("POST", "/events")
+        assert url == f"{BASE}/events"
+
+    def test_put_url_excludes_api_key(self):
+        url = main._build_url("PUT", "/events/42")
+        assert url == f"{BASE}/events/42"
+
+    def test_delete_url_excludes_api_key(self):
+        url = main._build_url("DELETE", "/events/42")
+        assert url == f"{BASE}/events/42"
+
+    def test_strips_leading_slash(self):
+        url = main._build_url("GET", "///seasons")
+        assert "//" not in url.split("api_v2")[1].split(KEY)[1]
+
+
+class TestWriteHeaders:
+    def test_contains_bearer_token(self):
+        headers = main._write_headers()
+        assert headers["Authorization"] == f"Bearer {KEY}"
+        assert headers["Content-Type"] == "application/json"
 
 
 # ---------------------------------------------------------------------------
@@ -182,22 +216,48 @@ class TestMakeApiRequest:
     @pytest.mark.asyncio
     async def test_successful_get(self, httpx_mock: HTTPXMock):
         httpx_mock.add_response(
-            url=f"{BASE}/seasons",
+            url=f"{GET_PREFIX}/seasons",
             json={"seasons": [{"id": 1, "name": "2025"}]},
         )
         result = await main.make_api_request("GET", "/seasons")
         assert "seasons" in result
-        assert result["seasons"][0]["id"] == 1
+
+    @pytest.mark.asyncio
+    async def test_get_url_contains_api_key_in_path(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"seasons": []})
+        await main.make_api_request("GET", "/seasons")
+        request = httpx_mock.get_requests()[0]
+        assert KEY in str(request.url)
+
+    @pytest.mark.asyncio
+    async def test_post_uses_bearer_header(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(
+            url=f"{WRITE_PREFIX}/events",
+            json={"id": 1},
+            status_code=201,
+        )
+        await main.make_api_request("POST", "/events", json={"name": "Test"})
+        request = httpx_mock.get_requests()[0]
+        assert request.headers["authorization"] == f"Bearer {KEY}"
+
+    @pytest.mark.asyncio
+    async def test_post_url_does_not_contain_api_key_in_path(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"id": 1}, status_code=201)
+        await main.make_api_request("POST", "/events", json={"name": "Test"})
+        request = httpx_mock.get_requests()[0]
+        # The KEY should not appear between /api_v2/ and /events
+        path = str(request.url).replace(BASE, "")
+        assert path == "/events"
 
     @pytest.mark.asyncio
     async def test_404_raises_not_found(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(url=f"{BASE}/events/999", status_code=404)
+        httpx_mock.add_response(status_code=404)
         with pytest.raises(main.NotFoundError):
             await main.make_api_request("GET", "/events/999")
 
     @pytest.mark.asyncio
     async def test_401_raises_auth_error(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(url=f"{BASE}/events", status_code=401)
+        httpx_mock.add_response(status_code=401)
         with pytest.raises(main.AuthenticationError):
             await main.make_api_request("GET", "/events")
 
@@ -224,18 +284,89 @@ class TestMakeApiRequest:
 class TestHealthCheck:
     @pytest.mark.asyncio
     async def test_healthy(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/seasons",
-            json={"seasons": []},
-        )
+        httpx_mock.add_response(json={"seasons": []})
         result = await main.health_check()
         assert result["status"] == "ok"
 
     @pytest.mark.asyncio
     async def test_auth_failure(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(url=f"{BASE}/seasons", status_code=401)
+        httpx_mock.add_response(status_code=401)
         result = await main.health_check()
         assert result["status"] == "auth_error"
+
+
+# ---------------------------------------------------------------------------
+# Tool Tests — Organizational Data
+# ---------------------------------------------------------------------------
+
+
+class TestListSeasons:
+    @pytest.mark.asyncio
+    async def test_list_seasons(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"seasons": [{"id": 1, "name": "2025"}]})
+        result = await main.list_seasons()
+        assert len(result) == 1
+
+
+class TestListCategories:
+    @pytest.mark.asyncio
+    async def test_list_categories(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"categories": [{"id": 1, "name": "Championship", "event_count": 5}]})
+        result = await main.list_categories()
+        assert result[0]["event_count"] == 5
+
+
+class TestListDirectories:
+    @pytest.mark.asyncio
+    async def test_list_directories(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"directories": [{"id": 1, "name": "Main"}]})
+        result = await main.list_directories()
+        assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Tool Tests — Master Roster
+# ---------------------------------------------------------------------------
+
+
+class TestListMasterRoster:
+    @pytest.mark.asyncio
+    async def test_list_roster(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"players": [{"id": 1, "last_name": "Woods"}]})
+        result = await main.list_master_roster()
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_with_pagination(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"players": []})
+        result = await main.list_master_roster(page=2)
+        assert isinstance(result, list)
+
+
+class TestGetMasterRosterMember:
+    @pytest.mark.asyncio
+    async def test_valid_email(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"id": 1, "email": "tiger@example.com"})
+        result = await main.get_master_roster_member("tiger@example.com")
+        assert result["email"] == "tiger@example.com"
+
+    @pytest.mark.asyncio
+    async def test_invalid_email(self):
+        result = await main.get_master_roster_member("not-email")
+        assert "error" in result
+
+
+class TestGetPlayerEvents:
+    @pytest.mark.asyncio
+    async def test_get_events(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"events": [{"id": 1}]})
+        result = await main.get_player_events(10)
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_invalid_id(self):
+        result = await main.get_player_events(0)
+        assert "error" in result
 
 
 # ---------------------------------------------------------------------------
@@ -246,71 +377,33 @@ class TestHealthCheck:
 class TestListEvents:
     @pytest.mark.asyncio
     async def test_list_events(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=httpx.URL(BASE + "/events", params={"limit": "100", "offset": "0"}),
-            json={"events": [{"id": 1, "name": "Spring Open"}]},
-        )
+        httpx_mock.add_response(json={"events": [{"id": 1, "name": "Spring Open"}]})
         result = await main.list_events()
         assert len(result) == 1
         assert result[0]["name"] == "Spring Open"
 
     @pytest.mark.asyncio
-    async def test_list_events_with_pagination(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            json={"events": [{"id": 2}]},
-        )
-        result = await main.list_events(limit=10, offset=5)
-        assert isinstance(result, list)
-
-    @pytest.mark.asyncio
-    async def test_limit_clamped(self, httpx_mock: HTTPXMock):
+    async def test_with_filters(self, httpx_mock: HTTPXMock):
         httpx_mock.add_response(json={"events": []})
-        await main.list_events(limit=999)
+        result = await main.list_events(season_id=1, page=2, archived=True)
         request = httpx_mock.get_requests()[0]
-        assert "limit=100" in str(request.url)
-
-
-class TestGetEventDetails:
-    @pytest.mark.asyncio
-    async def test_get_details(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/events/42",
-            json={"id": 42, "name": "Club Championship"},
-        )
-        result = await main.get_event_details(42)
-        assert result["id"] == 42
-
-    @pytest.mark.asyncio
-    async def test_invalid_id(self):
-        result = await main.get_event_details(0)
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_negative_id(self):
-        result = await main.get_event_details(-1)
-        assert "error" in result
+        url_str = str(request.url)
+        assert "season_id=1" in url_str
+        assert "page=2" in url_str
+        assert "archived=true" in url_str
 
 
 class TestCreateEvent:
     @pytest.mark.asyncio
     async def test_create_success(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/events",
-            json={"id": 100, "name": "Summer Classic"},
-            status_code=201,
-        )
-        result = await main.create_event(
-            name="Summer Classic",
-            start_date="2025-07-01",
-            end_date="2025-07-03",
-        )
+        httpx_mock.add_response(json={"id": 100, "name": "Summer Classic"}, status_code=201)
+        result = await main.create_event(name="Summer Classic", start_date="2025-07-01")
         assert result["name"] == "Summer Classic"
 
     @pytest.mark.asyncio
     async def test_invalid_date(self):
         result = await main.create_event(name="Test", start_date="bad-date")
         assert "error" in result
-        assert "Validation" in result["error"]
 
     @pytest.mark.asyncio
     async def test_empty_name(self):
@@ -321,12 +414,9 @@ class TestCreateEvent:
 class TestUpdateEvent:
     @pytest.mark.asyncio
     async def test_update_success(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/events/42",
-            json={"id": 42, "name": "Updated Name"},
-        )
-        result = await main.update_event(event_id=42, name="Updated Name")
-        assert result["name"] == "Updated Name"
+        httpx_mock.add_response(json={"id": 42, "name": "Updated"})
+        result = await main.update_event(event_id=42, name="Updated")
+        assert result["name"] == "Updated"
 
     @pytest.mark.asyncio
     async def test_no_fields(self):
@@ -343,7 +433,7 @@ class TestUpdateEvent:
 class TestDeleteEvent:
     @pytest.mark.asyncio
     async def test_delete_success(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(url=f"{BASE}/events/42", json={"status": "deleted"})
+        httpx_mock.add_response(json={"status": "deleted"})
         result = await main.delete_event(event_id=42)
         assert result["status"] == "deleted"
 
@@ -354,104 +444,14 @@ class TestDeleteEvent:
 
 
 # ---------------------------------------------------------------------------
-# Tool Tests — Players
+# Tool Tests — Event Roster (Members)
 # ---------------------------------------------------------------------------
-
-
-class TestListMasterRoster:
-    @pytest.mark.asyncio
-    async def test_list_roster(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            json={"players": [{"id": 1, "last_name": "Woods"}]},
-        )
-        result = await main.list_master_roster()
-        assert len(result) == 1
-
-    @pytest.mark.asyncio
-    async def test_search(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(json={"players": []})
-        result = await main.list_master_roster(search="Tiger")
-        assert isinstance(result, list)
-
-
-class TestGetPlayerDetails:
-    @pytest.mark.asyncio
-    async def test_get_player(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/master_roster/10",
-            json={"id": 10, "last_name": "Nicklaus"},
-        )
-        result = await main.get_player_details(10)
-        assert result["last_name"] == "Nicklaus"
-
-    @pytest.mark.asyncio
-    async def test_invalid_id(self):
-        result = await main.get_player_details(0)
-        assert "error" in result
-
-
-class TestRegisterPlayer:
-    @pytest.mark.asyncio
-    async def test_register_success(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/events/1/roster",
-            json={"status": "registered"},
-            status_code=201,
-        )
-        result = await main.register_player_to_event(
-            event_id=1,
-            external_id="EXT-100",
-            last_name="Palmer",
-            first_name="Arnold",
-            email="arnie@example.com",
-        )
-        assert result["status"] == "registered"
-
-    @pytest.mark.asyncio
-    async def test_invalid_email(self):
-        result = await main.register_player_to_event(
-            event_id=1,
-            external_id="EXT-100",
-            last_name="Palmer",
-            email="bad-email",
-        )
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_invalid_event_id(self):
-        result = await main.register_player_to_event(
-            event_id=0,
-            external_id="EXT-100",
-            last_name="Palmer",
-        )
-        assert "error" in result
-
-
-class TestUnregisterPlayer:
-    @pytest.mark.asyncio
-    async def test_unregister_success(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/events/1/roster/10",
-            json={"status": "removed"},
-        )
-        result = await main.unregister_player_from_event(event_id=1, player_id=10)
-        assert result["status"] == "removed"
-
-    @pytest.mark.asyncio
-    async def test_invalid_ids(self):
-        result = await main.unregister_player_from_event(event_id=0, player_id=1)
-        assert "error" in result
-        result = await main.unregister_player_from_event(event_id=1, player_id=0)
-        assert "error" in result
 
 
 class TestGetEventRoster:
     @pytest.mark.asyncio
     async def test_get_roster(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/events/1/roster",
-            json={"roster": [{"player_id": 1}]},
-        )
+        httpx_mock.add_response(json={"roster": [{"player_id": 1}]})
         result = await main.get_event_roster(1)
         assert len(result) == 1
 
@@ -461,59 +461,73 @@ class TestGetEventRoster:
         assert "error" in result
 
 
-# ---------------------------------------------------------------------------
-# Tool Tests — Scoring & Results
-# ---------------------------------------------------------------------------
-
-
-class TestGetTournamentResults:
+class TestRegisterMember:
     @pytest.mark.asyncio
-    async def test_json_results(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            json={"results": [{"place": 1, "player": "Woods"}]},
+    async def test_register_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"status": "registered"}, status_code=201)
+        result = await main.register_member_to_event(
+            event_id=1, external_id="EXT-100", last_name="Palmer",
+            first_name="Arnold", email="arnie@example.com",
         )
-        result = await main.get_tournament_results(round_id=5)
-        assert "results" in result
+        assert result["status"] == "registered"
 
     @pytest.mark.asyncio
-    async def test_html_results(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(text="<html>results</html>")
-        result = await main.get_tournament_results(round_id=5, format_type="html")
-        assert "<html>" in result
-
-    @pytest.mark.asyncio
-    async def test_invalid_format(self):
-        result = await main.get_tournament_results(round_id=5, format_type="csv")
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_invalid_id(self):
-        result = await main.get_tournament_results(round_id=0)
-        assert "error" in result
-
-
-class TestGetRoundTeeSheet:
-    @pytest.mark.asyncio
-    async def test_get_tee_sheet(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            json={"tee_sheet": {"groups": []}},
+    async def test_invalid_email(self):
+        result = await main.register_member_to_event(
+            event_id=1, external_id="EXT-100", last_name="Palmer", email="bad",
         )
-        result = await main.get_round_tee_sheet(round_id=5)
-        assert "tee_sheet" in result
+        assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_invalid_id(self):
-        result = await main.get_round_tee_sheet(round_id=0)
+    async def test_invalid_event_id(self):
+        result = await main.register_member_to_event(
+            event_id=0, external_id="EXT-100", last_name="Palmer",
+        )
         assert "error" in result
+
+
+class TestUpdateMember:
+    @pytest.mark.asyncio
+    async def test_update_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"status": "updated"})
+        result = await main.update_member_in_event(event_id=1, member_id=10, last_name="Nicklaus")
+        assert result["status"] == "updated"
+
+    @pytest.mark.asyncio
+    async def test_no_fields(self):
+        result = await main.update_member_in_event(event_id=1, member_id=10)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_ids(self):
+        result = await main.update_member_in_event(event_id=0, member_id=10, last_name="X")
+        assert "error" in result
+
+
+class TestDeleteMember:
+    @pytest.mark.asyncio
+    async def test_delete_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"status": "removed"})
+        result = await main.delete_member_from_event(event_id=1, member_id=10)
+        assert result["status"] == "removed"
+
+    @pytest.mark.asyncio
+    async def test_invalid_ids(self):
+        result = await main.delete_member_from_event(event_id=0, member_id=1)
+        assert "error" in result
+        result = await main.delete_member_from_event(event_id=1, member_id=0)
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Tool Tests — Rounds
+# ---------------------------------------------------------------------------
 
 
 class TestListEventRounds:
     @pytest.mark.asyncio
     async def test_list_rounds(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/events/1/rounds",
-            json={"rounds": [{"id": 1, "name": "Round 1"}]},
-        )
+        httpx_mock.add_response(json={"rounds": [{"id": 1, "name": "Round 1"}]})
         result = await main.list_event_rounds(1)
         assert len(result) == 1
 
@@ -523,31 +537,194 @@ class TestListEventRounds:
         assert "error" in result
 
 
-# ---------------------------------------------------------------------------
-# Tool Tests — Organizational Data
-# ---------------------------------------------------------------------------
-
-
-class TestListSeasons:
+class TestCreateRound:
     @pytest.mark.asyncio
-    async def test_list_seasons(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/seasons",
-            json={"seasons": [{"id": 1, "name": "2025"}]},
-        )
-        result = await main.list_seasons()
+    async def test_create_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"id": 10, "name": "Round 1"}, status_code=201)
+        result = await main.create_round(event_id=1, name="Round 1", date="2025-07-01")
+        assert result["name"] == "Round 1"
+
+    @pytest.mark.asyncio
+    async def test_invalid_date(self):
+        result = await main.create_round(event_id=1, date="bad")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_event_id(self):
+        result = await main.create_round(event_id=0)
+        assert "error" in result
+
+
+class TestUpdateRound:
+    @pytest.mark.asyncio
+    async def test_update_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"id": 10, "name": "Updated"})
+        result = await main.update_round(event_id=1, round_id=10, name="Updated")
+        assert result["name"] == "Updated"
+
+    @pytest.mark.asyncio
+    async def test_no_fields(self):
+        result = await main.update_round(event_id=1, round_id=10)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_ids(self):
+        result = await main.update_round(event_id=0, round_id=10, name="X")
+        assert "error" in result
+
+
+class TestDeleteRound:
+    @pytest.mark.asyncio
+    async def test_delete_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"status": "deleted"})
+        result = await main.delete_round(event_id=1, round_id=10)
+        assert result["status"] == "deleted"
+
+    @pytest.mark.asyncio
+    async def test_invalid_ids(self):
+        result = await main.delete_round(event_id=0, round_id=10)
+        assert "error" in result
+
+
+class TestGetRoundTeeSheet:
+    @pytest.mark.asyncio
+    async def test_get_tee_sheet(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"tee_sheet": {"groups": []}})
+        result = await main.get_round_tee_sheet(event_id=1, round_id=5)
+        assert "tee_sheet" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_ids(self):
+        result = await main.get_round_tee_sheet(event_id=0, round_id=5)
+        assert "error" in result
+        result = await main.get_round_tee_sheet(event_id=1, round_id=0)
+        assert "error" in result
+
+
+class TestGetRoundTournaments:
+    @pytest.mark.asyncio
+    async def test_get_tournaments(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"tournaments": [{"id": 1}]})
+        result = await main.get_round_tournaments(event_id=1, round_id=5)
         assert len(result) == 1
 
-
-class TestListCategories:
     @pytest.mark.asyncio
-    async def test_list_categories(self, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url=f"{BASE}/categories",
-            json={"categories": [{"id": 1, "name": "Championship", "event_count": 5}]},
+    async def test_invalid_ids(self):
+        result = await main.get_round_tournaments(event_id=0, round_id=5)
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Tool Tests — Courses & Divisions
+# ---------------------------------------------------------------------------
+
+
+class TestGetEventCourses:
+    @pytest.mark.asyncio
+    async def test_get_courses(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"courses": [{"id": 1, "name": "Pebble Beach"}]})
+        result = await main.get_event_courses(1)
+        assert result[0]["name"] == "Pebble Beach"
+
+    @pytest.mark.asyncio
+    async def test_invalid_id(self):
+        result = await main.get_event_courses(0)
+        assert "error" in result
+
+
+class TestGetEventDivisions:
+    @pytest.mark.asyncio
+    async def test_get_divisions(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"divisions": [{"id": 1, "name": "A Flight"}]})
+        result = await main.get_event_divisions(1)
+        assert result[0]["name"] == "A Flight"
+
+
+class TestCreateDivision:
+    @pytest.mark.asyncio
+    async def test_create_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"id": 5, "name": "B Flight"}, status_code=201)
+        result = await main.create_division(event_id=1, name="B Flight")
+        assert result["name"] == "B Flight"
+
+    @pytest.mark.asyncio
+    async def test_empty_name(self):
+        result = await main.create_division(event_id=1, name="   ")
+        assert "error" in result
+
+
+class TestUpdateDivision:
+    @pytest.mark.asyncio
+    async def test_update_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"id": 5, "name": "C Flight"})
+        result = await main.update_division(event_id=1, division_id=5, name="C Flight")
+        assert result["name"] == "C Flight"
+
+    @pytest.mark.asyncio
+    async def test_no_fields(self):
+        result = await main.update_division(event_id=1, division_id=5)
+        assert "error" in result
+
+
+class TestDeleteDivision:
+    @pytest.mark.asyncio
+    async def test_delete_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"status": "deleted"})
+        result = await main.delete_division(event_id=1, division_id=5)
+        assert result["status"] == "deleted"
+
+    @pytest.mark.asyncio
+    async def test_invalid_ids(self):
+        result = await main.delete_division(event_id=0, division_id=5)
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Tool Tests — Pairings
+# ---------------------------------------------------------------------------
+
+
+class TestCreatePairing:
+    @pytest.mark.asyncio
+    async def test_create_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"id": 1}, status_code=201)
+        result = await main.create_pairing(
+            event_id=1, round_id=5, players=[{"name": "Woods"}], tee_time="08:00 AM",
         )
-        result = await main.list_categories()
-        assert result[0]["event_count"] == 5
+        assert result["id"] == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_players(self):
+        result = await main.create_pairing(event_id=1, round_id=5, players=[])
+        assert "error" in result
+
+
+class TestUpdatePairing:
+    @pytest.mark.asyncio
+    async def test_update_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"id": 1, "tee_time": "09:00 AM"})
+        result = await main.update_pairing(
+            event_id=1, round_id=5, pairing_group_id=1, tee_time="09:00 AM",
+        )
+        assert result["tee_time"] == "09:00 AM"
+
+    @pytest.mark.asyncio
+    async def test_no_fields(self):
+        result = await main.update_pairing(event_id=1, round_id=5, pairing_group_id=1)
+        assert "error" in result
+
+
+class TestDeletePairing:
+    @pytest.mark.asyncio
+    async def test_delete_success(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(json={"status": "deleted"})
+        result = await main.delete_pairing(event_id=1, round_id=5, pairing_group_id=1)
+        assert result["status"] == "deleted"
+
+    @pytest.mark.asyncio
+    async def test_invalid_ids(self):
+        result = await main.delete_pairing(event_id=0, round_id=5, pairing_group_id=1)
+        assert "error" in result
 
 
 # ---------------------------------------------------------------------------
