@@ -176,7 +176,7 @@ async def make_api_request(
     method: str,
     endpoint: str,
     **kwargs: Any,
-) -> Dict[str, Any]:
+) -> Any:
     """Make an authenticated request to the Golf Genius API.
 
     Auth routing:
@@ -252,11 +252,21 @@ async def make_raw_request(method: str, endpoint: str, **kwargs: Any) -> str:
 # Helper: safe result extraction
 # ---------------------------------------------------------------------------
 
-def _extract(result: Dict[str, Any], key: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
-    """Extract a list from the API response, or return the full error dict."""
-    if "error" in result:
+def _extract(result: Any, key: str) -> Any:
+    """Extract a list from the API response, or return the result as-is.
+
+    The Golf Genius API may return:
+    - A dict with a nested key:  {"seasons": [...]}  → extract the list
+    - A plain list directly:     [...]               → return as-is
+    - An error dict:             {"error": "..."}    → return as-is
+    """
+    if isinstance(result, list):
         return result
-    return result.get(key, [])
+    if isinstance(result, dict):
+        if "error" in result:
+            return result
+        return result.get(key, result)
+    return result
 
 
 # ---------------------------------------------------------------------------

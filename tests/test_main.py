@@ -194,17 +194,26 @@ class TestGetClient:
 
 
 class TestExtractHelper:
-    def test_extracts_key(self):
+    def test_extracts_key_from_dict(self):
         result = main._extract({"events": [{"id": 1}]}, "events")
         assert result == [{"id": 1}]
 
-    def test_returns_empty_list_for_missing_key(self):
+    def test_returns_full_dict_when_key_missing(self):
         result = main._extract({"other": "data"}, "events")
-        assert result == []
+        assert result == {"other": "data"}
 
     def test_returns_error_dict(self):
         result = main._extract({"error": "Something failed"}, "events")
         assert result == {"error": "Something failed"}
+
+    def test_returns_list_as_is(self):
+        """API may return a plain list instead of a dict with a nested key."""
+        result = main._extract([{"id": 1}, {"id": 2}], "seasons")
+        assert result == [{"id": 1}, {"id": 2}]
+
+    def test_returns_empty_list_as_is(self):
+        result = main._extract([], "seasons")
+        assert result == []
 
 
 # ---------------------------------------------------------------------------
