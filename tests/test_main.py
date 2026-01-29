@@ -296,12 +296,15 @@ class TestHealthCheck:
         httpx_mock.add_response(json={"seasons": []})
         result = await main.health_check()
         assert result["status"] == "ok"
+        assert "version" in result
+        assert result["version"] == main.VERSION
 
     @pytest.mark.asyncio
     async def test_auth_failure(self, httpx_mock: HTTPXMock):
         httpx_mock.add_response(status_code=401)
         result = await main.health_check()
         assert result["status"] == "auth_error"
+        assert "version" in result
 
 
 # ---------------------------------------------------------------------------
@@ -394,10 +397,10 @@ class TestListEvents:
     @pytest.mark.asyncio
     async def test_with_filters(self, httpx_mock: HTTPXMock):
         httpx_mock.add_response(json={"events": []})
-        result = await main.list_events(season_id=1, page=2, archived=True)
+        await main.list_events(season_id=1, page=2, archived=True)
         request = httpx_mock.get_requests()[0]
         url_str = str(request.url)
-        assert "season_id=1" in url_str
+        assert "season=1" in url_str
         assert "page=2" in url_str
         assert "archived=true" in url_str
 

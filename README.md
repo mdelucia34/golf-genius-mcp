@@ -4,12 +4,13 @@ An MCP (Model Context Protocol) server that provides tools for interacting with 
 
 ## Features
 
-- **Event Management**: List, create, update, and delete golf events
-- **Player Rosters**: Master roster lookup, event roster management, member registration
-- **Rounds & Scoring**: Create rounds, manage tee sheets, view tournament results
-- **Divisions & Courses**: Manage event divisions and view course details
-- **Pairings**: Create, update, and delete pairing groups (foursomes)
+- **Event Management**: List and view golf events with filtering options
+- **Player Rosters**: Master roster lookup, event roster viewing, player event history
+- **Rounds & Scoring**: View rounds, tee sheets, and tournament results
+- **Divisions & Courses**: View event divisions and course details
 - **Health Check**: Verify API connectivity and authentication status
+
+**Read-Only Mode**: This version includes 15 read-only tools optimized for performance. Write operations (create/update/delete) are available in the codebase but disabled by default.
 
 ## Prerequisites
 
@@ -86,10 +87,12 @@ The Golf Genius API uses a dual authentication scheme:
 
 The MCP server handles this automatically — you just provide the API key once.
 
-## Available Tools (28 total)
+## Available Tools (15 read-only tools)
+
+**Note**: Write operations (create/update/delete) are currently disabled for performance optimization. The functions remain in the codebase and can be re-enabled by uncommenting the `@mcp.tool()` decorators in `main.py`.
 
 ### Health Check
-- `health_check` — Verify API connectivity and authentication status
+- `health_check` — Verify API connectivity, authentication status, and server version
 
 ### Organizational Data
 - `list_seasons` — List all seasons configured in the customer center
@@ -103,35 +106,17 @@ The MCP server handles this automatically — you just provide the API key once.
 
 ### Event Management
 - `list_events` — List events with filtering by season, category, directory, and pagination
-- `create_event` — Create a new event or league
-- `update_event` — Update event details
-- `delete_event` — Soft delete (archive) an event
-
-### Event Roster (Members)
 - `get_event_roster` — Get the roster for an event with pagination and photos
-- `register_member_to_event` — Add a golfer to an event roster
-- `update_member_in_event` — Update member details and round assignments
-- `delete_member_from_event` — Remove a member from an event
 
-### Rounds
+### Rounds & Scoring
 - `list_event_rounds` — List all rounds for an event
-- `create_round` — Create a new round
-- `update_round` — Update round details
-- `delete_round` — Delete a round
 - `get_round_tee_sheet` — Get the tee sheet and scores for a round
 - `get_round_tournaments` — Get tournament configurations for a round
+- `get_tournament_results` — Get tournament results in HTML or JSON format
 
 ### Courses & Divisions
 - `get_event_courses` — Get courses with tee details and ratings
 - `get_event_divisions` — List external divisions for an event
-- `create_division` — Create a division
-- `update_division` — Update a division
-- `delete_division` — Delete a division
-
-### Pairings
-- `create_pairing` — Create a pairing group (foursome) with tee time
-- `update_pairing` — Update a pairing group
-- `delete_pairing` — Delete a pairing group
 
 ## Error Handling
 
@@ -141,6 +126,17 @@ The MCP server handles this automatically — you just provide the API key once.
 - **Timeouts** — 30-second request timeout, 10-second connect timeout
 - **Connection failures** — clear error messages for network issues
 - **Input validation** — Pydantic models validate dates (YYYY-MM-DD), emails, and required fields
+
+## Troubleshooting
+
+Having issues with the MCP server in Claude Desktop? See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for:
+- How to verify Claude Desktop is using the correct MCP version
+- How to restart/reload the MCP server
+- How to clear cache
+- Common issues and solutions
+- Testing the server directly
+
+**Quick Check:** In Claude Desktop, use the `health_check` tool to verify the server version and connectivity.
 
 ## Development
 

@@ -1,6 +1,6 @@
 [project]
 name = "golf-genius-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server for accessing Golf Genius API - provides tools for tournament management, player rosters, and scoring data"
 readme = "README.md"
 requires-python = ">=3.10"

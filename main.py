@@ -28,6 +28,7 @@ logger = logging.getLogger("golf-genius-mcp")
 
 API_KEY = os.getenv("GOLF_GENIUS_API_KEY")
 BASE_URL = "https://www.golfgenius.com/api_v2"
+VERSION = "0.2.4"  # MCP Server version - Force string-only IDs to prevent Claude from sending numbers
 
 # ---------------------------------------------------------------------------
 # Custom Exceptions
@@ -252,6 +253,32 @@ async def make_raw_request(method: str, endpoint: str, **kwargs: Any) -> str:
 # Helper: safe result extraction
 # ---------------------------------------------------------------------------
 
+def _sanitize_ids(data: Any) -> Any:
+    """Convert all large integer IDs to strings to prevent JavaScript precision loss.
+
+    JavaScript cannot safely represent integers larger than 2^53 - 1 (9,007,199,254,740,991).
+    Golf Genius IDs often exceed this limit, so we convert all numeric IDs to strings.
+    Also uses id_str when available as the API provides both formats.
+    """
+    if isinstance(data, dict):
+        sanitized = {}
+        for key, value in data.items():
+            # If there's an id_str field, use it to replace the numeric id
+            if key == "id" and "id_str" in data:
+                sanitized[key] = str(data["id_str"])
+            # Convert numeric id fields to strings
+            elif key == "id" and isinstance(value, (int, float)):
+                sanitized[key] = str(int(value))
+            # Recursively sanitize nested structures
+            else:
+                sanitized[key] = _sanitize_ids(value)
+        return sanitized
+    elif isinstance(data, list):
+        return [_sanitize_ids(item) for item in data]
+    else:
+        return data
+
+
 def _extract(result: Any, key: str) -> Any:
     """Extract a list from the API response, or return the result as-is.
 
@@ -259,13 +286,16 @@ def _extract(result: Any, key: str) -> Any:
     - A dict with a nested key:  {"seasons": [...]}  → extract the list
     - A plain list directly:     [...]               → return as-is
     - An error dict:             {"error": "..."}    → return as-is
+
+    All IDs are sanitized to strings to prevent JavaScript precision loss.
     """
     if isinstance(result, list):
-        return result
+        return _sanitize_ids(result)
     if isinstance(result, dict):
         if "error" in result:
             return result
-        return result.get(key, result)
+        extracted = result.get(key, result)
+        return _sanitize_ids(extracted)
     return result
 
 
@@ -277,18 +307,23 @@ def _extract(result: Any, key: str) -> Any:
 async def health_check() -> Dict[str, Any]:
     """Check API connectivity and authentication status.
 
-    Returns the connection status and authentication validity.
+    Returns the connection status, authentication validity, and server version.
     """
     logger.info("Running health check")
     try:
         result = await make_api_request("GET", "/seasons")
         if "error" in result:
-            return {"status": "error", "message": result["error"]}
-        return {"status": "ok", "message": "Connected and authenticated successfully."}
+            return {"status": "error", "message": result["error"], "version": VERSION}
+        return {
+            "status": "ok",
+            "message": "Connected and authenticated successfully.",
+            "version": VERSION,
+            "server": "Golf Genius MCP Server"
+        }
     except AuthenticationError:
-        return {"status": "auth_error", "message": "API key is invalid or expired."}
+        return {"status": "auth_error", "message": "API key is invalid or expired.", "version": VERSION}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": str(e), "version": VERSION}
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +372,7 @@ async def list_master_roster(
     if photo is not None:
         params["photo"] = str(photo).lower()
 
-    result = await make_api_request("GET", "/master_roster", params=params)
+    result = await make_api_request("GET", "/master_roster?", params=params)
     return _extract(result, "players")
 
 
@@ -351,18 +386,23 @@ async def get_master_roster_member(email: str) -> Dict[str, Any]:
     if not email or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         return {"error": "A valid email address is required."}
 
-    return await make_api_request("GET", f"/master_roster_member/{email}")
+    result = await make_api_request("GET", f"/master_roster_member/{email}")
+    return _sanitize_ids(result)
 
 
 @mcp.tool()
-async def get_player_events(player_id: int) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+async def get_player_events(player_id: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """List all events associated with a specific player.
 
     Args:
-        player_id: The ID of the player
+        player_id: The ID of the player (MUST be string to preserve precision for large IDs)
     """
-    if player_id <= 0:
-        return {"error": "player_id must be a positive integer."}
+    try:
+        pid = int(player_id)
+        if pid <= 0:
+            return {"error": "player_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "player_id must be a valid integer."}
 
     result = await make_api_request("GET", f"/players/{player_id}")
     return _extract(result, "events")
@@ -374,38 +414,38 @@ async def get_player_events(player_id: int) -> Union[List[Dict[str, Any]], Dict[
 
 @mcp.tool()
 async def list_events(
-    season_id: Optional[int] = None,
-    category_id: Optional[int] = None,
-    directory_id: Optional[int] = None,
+    season_id: Optional[str] = None,
+    category_id: Optional[str] = None,
+    directory_id: Optional[str] = None,
     archived: Optional[bool] = None,
     page: Optional[int] = None,
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """List golf events with optional filtering and pagination.
 
     Args:
-        season_id: Filter by season ID
-        category_id: Filter by category ID
-        directory_id: Filter by directory ID
+        season_id: Filter by season ID (MUST be string to preserve precision for large IDs)
+        category_id: Filter by category ID (MUST be string to preserve precision for large IDs)
+        directory_id: Filter by directory ID (MUST be string to preserve precision for large IDs)
         archived: Include archived events
         page: Page number for pagination
     """
     params: Dict[str, Any] = {}
     if season_id is not None:
-        params["season_id"] = season_id
+        params["season"] = str(season_id)
     if category_id is not None:
-        params["category_id"] = category_id
+        params["category"] = str(category_id)
     if directory_id is not None:
-        params["directory_id"] = directory_id
+        params["directory"] = str(directory_id)
     if archived is not None:
         params["archived"] = str(archived).lower()
     if page is not None:
         params["page"] = max(1, page)
 
-    result = await make_api_request("GET", "/events", params=params)
+    result = await make_api_request("GET", "/events?", params=params)
     return _extract(result, "events")
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def create_event(
     name: str,
     event_type: str = "event",
@@ -445,7 +485,7 @@ async def create_event(
     return await make_api_request("POST", "/events", json=payload)
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def update_event(
     event_id: int,
     name: Optional[str] = None,
@@ -486,7 +526,7 @@ async def update_event(
     return await make_api_request("PUT", f"/events/{event_id}", json=payload)
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def delete_event(event_id: int) -> Dict[str, Any]:
     """Delete (archive) a golf event.
 
@@ -506,19 +546,23 @@ async def delete_event(event_id: int) -> Dict[str, Any]:
 
 @mcp.tool()
 async def get_event_roster(
-    event_id: int,
+    event_id: str,
     page: Optional[int] = None,
     photo: Optional[bool] = None,
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """Get the roster of golfers for a specific event.
 
     Args:
-        event_id: ID of the event
+        event_id: ID of the event (MUST be string to preserve precision for large IDs)
         page: Page number for pagination
         photo: Include player photos in response
     """
-    if event_id <= 0:
-        return {"error": "event_id must be a positive integer."}
+    try:
+        eid = int(event_id)
+        if eid <= 0:
+            return {"error": "event_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "event_id must be a valid integer."}
 
     params: Dict[str, Any] = {}
     if page is not None:
@@ -526,11 +570,11 @@ async def get_event_roster(
     if photo is not None:
         params["photo"] = str(photo).lower()
 
-    result = await make_api_request("GET", f"/events/{event_id}/roster", params=params)
+    result = await make_api_request("GET", f"/events/{event_id}/roster?", params=params)
     return _extract(result, "roster")
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def register_member_to_event(
     event_id: int,
     external_id: str,
@@ -568,7 +612,7 @@ async def register_member_to_event(
     return await make_api_request("POST", f"/events/{event_id}/members", json=payload)
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def update_member_in_event(
     event_id: int,
     member_id: int,
@@ -611,7 +655,7 @@ async def update_member_in_event(
     return await make_api_request("PUT", f"/events/{event_id}/members/{member_id}", json=payload)
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def delete_member_from_event(
     event_id: int,
     member_id: int,
@@ -636,20 +680,24 @@ async def delete_member_from_event(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def list_event_rounds(event_id: int) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+async def list_event_rounds(event_id: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """List all rounds for a specific event.
 
     Args:
-        event_id: ID of the event
+        event_id: ID of the event (MUST be string to preserve precision for large IDs)
     """
-    if event_id <= 0:
-        return {"error": "event_id must be a positive integer."}
+    try:
+        eid = int(event_id)
+        if eid <= 0:
+            return {"error": "event_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "event_id must be a valid integer."}
 
     result = await make_api_request("GET", f"/events/{event_id}/rounds")
     return _extract(result, "rounds")
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def create_round(
     event_id: int,
     name: Optional[str] = None,
@@ -678,7 +726,7 @@ async def create_round(
     return await make_api_request("POST", f"/events/{event_id}/rounds", json=payload)
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def update_round(
     event_id: int,
     round_id: int,
@@ -714,7 +762,7 @@ async def update_round(
     return await make_api_request("PUT", f"/events/{event_id}/rounds/{round_id}", json=payload)
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def delete_round(
     event_id: int,
     round_id: int,
@@ -736,46 +784,65 @@ async def delete_round(
 
 @mcp.tool()
 async def get_round_tee_sheet(
-    event_id: int,
-    round_id: int,
+    event_id: str,
+    round_id: str,
     include_all_custom_fields: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Get the tee sheet and scores for a specific round.
 
     Args:
-        event_id: ID of the event
-        round_id: ID of the round
+        event_id: ID of the event (MUST be string to preserve precision for large IDs)
+        round_id: ID of the round (MUST be string to preserve precision for large IDs)
         include_all_custom_fields: Include all custom fields in the response
     """
-    if event_id <= 0:
-        return {"error": "event_id must be a positive integer."}
-    if round_id <= 0:
-        return {"error": "round_id must be a positive integer."}
+    try:
+        eid = int(event_id)
+        if eid <= 0:
+            return {"error": "event_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "event_id must be a valid integer."}
+
+    try:
+        rid = int(round_id)
+        if rid <= 0:
+            return {"error": "round_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "round_id must be a valid integer."}
 
     params: Dict[str, Any] = {}
     if include_all_custom_fields is not None:
         params["include_all_custom_fields"] = str(include_all_custom_fields).lower()
 
-    return await make_api_request(
-        "GET", f"/events/{event_id}/rounds/{round_id}/tee_sheet", params=params
+    result = await make_api_request(
+        "GET", f"/events/{event_id}/rounds/{round_id}/tee_sheet?", params=params
     )
+    return _sanitize_ids(result)
 
 
 @mcp.tool()
 async def get_round_tournaments(
-    event_id: int,
-    round_id: int,
+    event_id: str,
+    round_id: str,
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """Get tournament configurations for a specific round.
 
     Args:
-        event_id: ID of the event
-        round_id: ID of the round
+        event_id: ID of the event (MUST be string to preserve precision for large IDs)
+        round_id: ID of the round (MUST be string to preserve precision for large IDs)
     """
-    if event_id <= 0:
-        return {"error": "event_id must be a positive integer."}
-    if round_id <= 0:
-        return {"error": "round_id must be a positive integer."}
+    try:
+        eid = int(event_id)
+        if eid <= 0:
+            return {"error": "event_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "event_id must be a valid integer."}
+
+    try:
+        rid = int(round_id)
+        if rid <= 0:
+            return {"error": "round_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "round_id must be a valid integer."}
 
     result = await make_api_request(
         "GET", f"/events/{event_id}/rounds/{round_id}/tournaments"
@@ -783,39 +850,97 @@ async def get_round_tournaments(
     return _extract(result, "tournaments")
 
 
+@mcp.tool()
+async def get_tournament_results(
+    event_id: str,
+    round_id: str,
+    tournament_id: str,
+    format: str = "html",
+) -> Union[str, Dict[str, Any]]:
+    """Get tournament results for a specific tournament in a round.
+
+    Args:
+        event_id: ID of the event (MUST be string to preserve precision for large IDs)
+        round_id: ID of the round (MUST be string to preserve precision for large IDs)
+        tournament_id: ID of the tournament (MUST be string to preserve precision for large IDs)
+        format: Response format - 'html' (strongly recommended) or 'json'
+    """
+    try:
+        eid = int(event_id)
+        if eid <= 0:
+            return {"error": "event_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "event_id must be a valid integer."}
+
+    try:
+        rid = int(round_id)
+        if rid <= 0:
+            return {"error": "round_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "round_id must be a valid integer."}
+
+    try:
+        tid = int(tournament_id)
+        if tid <= 0:
+            return {"error": "tournament_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "tournament_id must be a valid integer."}
+
+    if format not in ("html", "json"):
+        return {"error": "format must be either 'html' or 'json'."}
+
+    endpoint = f"/events/{event_id}/rounds/{round_id}/tournaments/{tournament_id}.{format}"
+
+    if format == "html":
+        logger.info("Getting HTML tournament results for tournament %d", tournament_id)
+        return await make_raw_request("GET", endpoint)
+    else:
+        logger.info("Getting JSON tournament results for tournament %d", tournament_id)
+        result = await make_api_request("GET", endpoint)
+        return _sanitize_ids(result)
+
+
 # ---------------------------------------------------------------------------
 # Tools — Courses & Divisions
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def get_event_courses(event_id: int) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+async def get_event_courses(event_id: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """Get the list of selected courses for an event, including tee details and ratings.
 
     Args:
-        event_id: ID of the event
+        event_id: ID of the event (MUST be string to preserve precision for large IDs)
     """
-    if event_id <= 0:
-        return {"error": "event_id must be a positive integer."}
+    try:
+        eid = int(event_id)
+        if eid <= 0:
+            return {"error": "event_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "event_id must be a valid integer."}
 
     result = await make_api_request("GET", f"/events/{event_id}/courses")
     return _extract(result, "courses")
 
 
 @mcp.tool()
-async def get_event_divisions(event_id: int) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+async def get_event_divisions(event_id: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """List external divisions for an event.
 
     Args:
-        event_id: ID of the event
+        event_id: ID of the event (MUST be string to preserve precision for large IDs)
     """
-    if event_id <= 0:
-        return {"error": "event_id must be a positive integer."}
+    try:
+        eid = int(event_id)
+        if eid <= 0:
+            return {"error": "event_id must be a positive integer."}
+    except (ValueError, TypeError):
+        return {"error": "event_id must be a valid integer."}
 
     result = await make_api_request("GET", f"/events/{event_id}/divisions")
     return _extract(result, "divisions")
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def create_division(
     event_id: int,
     name: str,
@@ -835,7 +960,7 @@ async def create_division(
     return await make_api_request("POST", f"/events/{event_id}/divisions", json={"name": name})
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def update_division(
     event_id: int,
     division_id: int,
@@ -864,7 +989,7 @@ async def update_division(
     return await make_api_request("PUT", f"/events/{event_id}/divisions/{division_id}", json=payload)
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def delete_division(
     event_id: int,
     division_id: int,
@@ -888,7 +1013,7 @@ async def delete_division(
 # Tools — Pairings
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def create_pairing(
     event_id: int,
     round_id: int,
@@ -920,7 +1045,7 @@ async def create_pairing(
     )
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def update_pairing(
     event_id: int,
     round_id: int,
@@ -961,7 +1086,7 @@ async def update_pairing(
     )
 
 
-@mcp.tool()
+# @mcp.tool()  # Disabled for performance - read-only mode
 async def delete_pairing(
     event_id: int,
     round_id: int,
